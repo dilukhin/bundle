@@ -38,8 +38,8 @@ $```
 Особенности:
 • Файлы в UTF-8 (включая UTF-8-BOM) сохраняются один раз без дублирования
 • Бинарные файлы определяются по наличию нулевого байта (\x00) — только base64
-• Все текстовые файлы перекодируются в UTF-8 для читаемости модели
-• Оригинальные байты всегда доступны для точного восстановления
+• Все текстовые файлы перекодируются в UTF-8 с нормализацией окончаний строк до LF (\n)
+• Оригинальные байты (включая CRLF) всегда доступны в base64-блоке
 • Мета-информация в формате <!-- bundle:... --> (минимально интрузивный вариант)
 
 Примеры использования:
@@ -95,7 +95,6 @@ def is_binary_file(path, sample_size=1024):
     try:
         with open(path, 'rb') as f:
             sample = f.read(sample_size)
-            # Логируем факт чтения как бинарного (как просил пользователь)
             if b'\x00' in sample:
                 return True
             return False
@@ -112,22 +111,24 @@ def normalize_encoding_name(enc):
 
 def read_file_with_encoding(path, explicit_encoding=None):
     """
-    Прочитать файл с обработкой кодировок.
+    Прочитать файл с обработкой кодировок и окончаний строк.
     
     Возвращает кортеж:
-      (текст_utf8_или_None, исходная_кодировка, нужно_base64, является_бинарным, ошибка)
+      (текст_utf8_с_LF, исходная_кодировка, нужно_base64, является_бинарным, ошибка)
     
     Логика:
-      1. Сначала проверяем на бинарность по наличию \x00
-      2. Если текстовый — детектируем кодировку или используем явную
-      3. Декодируем в UTF-8 для основного блока
-      4. Определяем, нужен ли base64 (только если НЕ был в UTF-8 изначально)
+      1. Проверяем на бинарность по \x00
+      2. Читаем как бинарные данные (сохраняем оригинальные байты)
+      3. Детектируем кодировку или используем явную
+      4. Декодируем в строку с универсальным режимом (сохраняем все \r и \n)
+      5. Нормализуем окончания строк до LF (\n) для бандла
+      6. Определяем, нужен ли base64 (если не UTF-8)
     """
     # Шаг 1: проверка на бинарность
     if is_binary_file(path):
         return None, "binary", True, True, None
     
-    # Шаг 2: читаем бинарные данные
+    # Шаг 2: читаем бинарные данные (для base64 и детектирования)
     try:
         with open(path, "rb") as f:
             raw_bytes = f.read()
@@ -145,16 +146,21 @@ def read_file_with_encoding(path, explicit_encoding=None):
     if not encoding:
         encoding = "utf-8"
     
-    # Шаг 4: пробуем декодировать
+    # Шаг 4: декодируем с сохранением всех символов (включая \r)
     try:
-        text = raw_bytes.decode(encoding)
+        # Используем errors='strict' чтобы поймать реальные ошибки
+        text_with_original_line_endings = raw_bytes.decode(encoding)
+        
+        # Нормализуем окончания строк до LF (\n) для бандла
+        # Это стандарт для Markdown и LLM
+        normalized_text = text_with_original_line_endings.replace('\r\n', '\n').replace('\r', '\n')
         
         # Проверяем, был ли файл уже в UTF-8 (включая UTF-8-BOM)
         normalized_enc = normalize_encoding_name(encoding)
         is_utf8_family = normalized_enc in ['utf-8', 'utf-8-sig', 'utf-8-bom', 'utf8', 'utf8-sig']
         needs_base64 = not is_utf8_family
         
-        return text, encoding, needs_base64, False, None
+        return normalized_text, encoding, needs_base64, False, None
     except (UnicodeDecodeError, LookupError) as e:
         # Если декодирование не удалось — считаем бинарным
         return None, encoding, True, True, f"Декодирование {encoding} не удалось: {e}"
@@ -166,7 +172,8 @@ def collect_files(root, patterns, ignore_dirs):
     for dirpath, dirnames, filenames in os.walk(root):
         dirpath = Path(dirpath)
         # Пропускаем игнорируемые директории
-        if any(part in ignore_dirs for part in dirpath.relative_to(root).parts):
+        rel_parts = dirpath.relative_to(root).parts
+        if any(part in ignore_dirs for part in rel_parts if part):
             continue
         for name in filenames:
             rel = (dirpath / name).relative_to(root)
@@ -236,7 +243,9 @@ def main():
     converted_count = 0
     binary_count = 0
     
-    with open(args.output, "w", encoding="utf-8") as out:
+    # Открываем выходной файл в текстовом режиме с фиксированным newline='\n'
+    # Это гарантирует, что все \n останутся \n, а не превратятся в \r\n в Windows
+    with open(args.output, "w", encoding="utf-8", newline='\n') as out:
         out.write(f"# Bundle from `{root}`\n\n")
         
         for rel in files:
@@ -282,12 +291,12 @@ def main():
                 print(f"[BIN] {rel} ({norm_enc})")
                 continue
             
-            # Текстовый файл — сохраняем в UTF-8
+            # Текстовый файл — сохраняем в UTF-8 с LF-окончаниями
             norm_enc = normalize_encoding_name(detected_enc)
             out.write(f"<!-- bundle:encoding={norm_enc} -->\n")
             lang = rel.suffix[1:] if rel.suffix else ""
             out.write(f"```{lang}\n")
-            # Убеждаемся, что текст заканчивается переводом строки
+            # Убеждаемся, что текст заканчивается одним переводом строки (LF)
             if text and not text.endswith('\n'):
                 text += '\n'
             out.write(text)

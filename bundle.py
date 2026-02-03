@@ -208,6 +208,11 @@ def main():
         default=None,
         help="Кодировка по умолчанию или маппинг: '*.txt:cp866,*.log:windows-1251'"
     )
+    ap.add_argument(
+        "--no-binary-backup",
+        action="store_true",
+        help="Не добавлять base64-блоки с оригинальными байтами (экономия места, но нельзя восстановить оригинал)"
+    )
     args = ap.parse_args()
     
     root = Path(args.root).resolve()
@@ -244,9 +249,10 @@ def main():
     binary_count = 0
     
     # Открываем выходной файл в текстовом режиме с фиксированным newline='\n'
-    # Это гарантирует, что все \n останутся \n, а не превратятся в \r\n в Windows
     with open(args.output, "w", encoding="utf-8", newline='\n') as out:
         out.write(f"# Bundle from `{root}`\n\n")
+        if args.no_binary_backup:
+            out.write("<!-- bundle:no-binary-backup=true -->\n\n")
         
         for rel in files:
             path = root / rel
@@ -296,14 +302,13 @@ def main():
             out.write(f"<!-- bundle:encoding={norm_enc} -->\n")
             lang = rel.suffix[1:] if rel.suffix else ""
             out.write(f"```{lang}\n")
-            # Убеждаемся, что текст заканчивается одним переводом строки (LF)
             if text and not text.endswith('\n'):
                 text += '\n'
             out.write(text)
             out.write("```\n")
             
-            # Добавляем base64 только если файл НЕ был в UTF-8 изначально
-            if needs_base64:
+            # Добавляем base64 только если нужно И если не запрещено опцией
+            if needs_base64 and not args.no_binary_backup:
                 converted_count += 1
                 total_count += 1
                 out.write(f"\n## `{rel}` (original bytes)\n")
@@ -313,20 +318,29 @@ def main():
                 out.write("\n```\n\n")
                 print(f"[CONV] {rel} ({norm_enc} → UTF-8 + base64)")
             else:
-                utf8_count += 1
+                if needs_base64:
+                    # Base64 пропущен из-за опции
+                    converted_count += 1
+                    print(f"[CONV] {rel} ({norm_enc} → UTF-8, base64 skipped)")
+                else:
+                    utf8_count += 1
+                    print(f"[UTF8] {rel} ({norm_enc})")
                 total_count += 1
-                print(f"[UTF8] {rel} ({norm_enc})")
             
             out.write("\n")
     
     print(f"\n✅ Записано {args.output}")
     print(f"   Всего файлов: {total_count}")
     print(f"   • UTF-8 (без дублирования): {utf8_count}")
-    print(f"   • Конвертировано (с base64): {converted_count}")
+    if not args.no_binary_backup:
+        print(f"   • Конвертировано (с base64): {converted_count}")
+    else:
+        print(f"   • Конвертировано (без base64): {converted_count}")
     print(f"   • Бинарные: {binary_count}")
+    if args.no_binary_backup:
+        print(f"\n⚠️  Внимание: оригинальные байты НЕ сохранены (опция --no-binary-backup)")
     print(f"\n💡 Совет: Для восстановления оригинала используйте base64-блоки")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

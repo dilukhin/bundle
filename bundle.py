@@ -1,173 +1,323 @@
 #!/usr/bin/env python3
 """
-bundle.py — Project source bundler
-=================================
+bundle.py — Сборщик исходного кода в единый Markdown-бандл
+==========================================================
 
-This utility collects multiple source files from a directory tree and
-bundles them into a single Markdown document (bundle.md by default).
+Назначение:
+Собирает файлы проекта в один читаемый документ для передачи LLM (ChatGPT и др.).
+Автоматически обрабатывает разные кодировки (UTF-8, windows-1251, cp866 и др.),
+сохраняя оригинальные байты в base64 для точного восстановления.
 
-It is designed for:
-  - uploading whole projects into ChatGPT / LLMs
-  - code reviews
-  - architecture analysis
-  - long-term snapshots of a codebase
+Поддерживаемые кодировки (автодетектирование):
+  • utf-8, utf-8-sig (с BOM)
+  • windows-1251 (cp1251) — кириллица Windows
+  • cp866 — кириллица DOS
+  • koi8-r — кириллица Unix
+  • iso-8859-5 — кириллица ISO
+  • ascii — латиница без диакритики
+  • и другие текстовые кодировки
 
-Each file is embedded in Markdown as:
+Полный список кодировок Python: https://docs.python.org/3/library/codecs.html#standard-encodings
+Или выполните в Python: import encodings; help(encodings)
 
-    ## relative/path/to/file.ext
-    ```ext
-    file contents
-    ```
+Формат бандла:
+$# Bundle from `/путь/к/проекту`
+$
+$---
+$## `путь/к/файлу.cpp`
+$<!-- bundle:encoding=windows-1251 -->
+$```cpp
+$// содержимое, перекодированное в UTF-8 (читаемо для LLM)
+$```
+$
+$## `путь/к/файлу.cpp` (original bytes)
+$```base64
+$// оригинальные байты в base64 (для восстановления)
+$```
 
-So syntax highlighting is preserved when viewing or pasting.
+Особенности:
+• Файлы в UTF-8 (включая UTF-8-BOM) сохраняются один раз без дублирования
+• Бинарные файлы определяются по наличию нулевого байта (\x00) — только base64
+• Все текстовые файлы перекодируются в UTF-8 для читаемости модели
+• Оригинальные байты всегда доступны для точного восстановления
+• Мета-информация в формате <!-- bundle:... --> (минимально интрузивный вариант)
 
-------------------------------------------------------------
-Basic usage
-------------------------------------------------------------
+Примеры использования:
+  # Собрать проект с кодом на кириллице (win1251)
+  python bundle.py . -o bundle.md -p "*.cpp,*.h"
 
-    python bundle.py
-    python bundle.py . -o bundle.md
-    python bundle.py ../myproject -o snapshot.md
+  # Явно указать кодировку для определённых файлов
+  python bundle.py . --encoding="*.txt:cp866,*.log:windows-1251"
 
-------------------------------------------------------------
-Selecting files
-------------------------------------------------------------
+  # Исключить директории
+  python bundle.py . --ignore ".git,build,__pycache__"
 
-Use --patterns to control which files are included:
+Требования:
+  pip install charset-normalizer
 
-    -p "*.cpp,*.h,*.hpp,*.py,*.md"
-
-Patterns are matched against filenames using glob syntax.
-
-------------------------------------------------------------
-Ignoring directories
-------------------------------------------------------------
-
-Use --ignore to exclude directories by name:
-
-    --ignore ".git,build,node_modules,dist,__pycache__"
-
-If any directory in a file's path matches one of these names,
-that file is skipped.
-
-------------------------------------------------------------
-Output format
-------------------------------------------------------------
-
-The output file contains:
-
-    # Bundle from `/absolute/project/path`
-
-    ---
-    ## `src/main.cpp`
-    ```cpp
-    <file contents>
-    ```
-
-    ---
-    ## `include/foo.h`
-    ```h
-    <file contents>
-    ```
-
-This format works well with Markdown renderers and LLMs.
-
-------------------------------------------------------------
-Typical workflow
-------------------------------------------------------------
-
-    python bundle.py . -o bundle.md -p "*.cpp,*.h,*.cmake"
-
-Then upload bundle.md into ChatGPT and ask:
-
-    "Analyze this codebase"
-
-------------------------------------------------------------
-Limitations
-------------------------------------------------------------
-
-- Does not read .gitignore (only --ignore list)
-- Includes files purely by filename glob
-- Does not detect binary files
-- Does not trim large files
-
-These can be extended if needed.
+Запуск без параметров покажет краткую справку.
 """
 
 import argparse
 import os
+import sys
+import base64
 import fnmatch
 from pathlib import Path
+from charset_normalizer import from_path
 
 
-def should_ignore(path, ignore_dirs):
-    for part in path.parts:
-        if part in ignore_dirs:
-            return True
-    return False
+def show_short_help():
+    """Показать краткую справку при запуске без параметров"""
+    print("""
+bundle.py — сборщик исходного кода в Markdown-бандл
+
+Быстрый старт:
+  python bundle.py . -o bundle.md -p "*.cpp,*.h,*.py"
+
+Ключевые опции:
+  -p "*.cpp,*.h"        — шаблоны файлов для включения
+  --ignore ".git,build" — исключить директории
+  --encoding "win1251"  — кодировка по умолчанию или "*.txt:cp866"
+
+Полная справка: python bundle.py --help
+Документация: см. комментарии в начале скрипта
+""")
+    sys.exit(0)
+
+
+def is_binary_file(path, sample_size=1024):
+    """
+    Определить, является ли файл бинарным.
+    Критерий: наличие нулевого байта (\x00) в первых 1024 байтах.
+    Это надёжный признак бинарного файла (исполняемые, изображения, архивы).
+    """
+    try:
+        with open(path, 'rb') as f:
+            sample = f.read(sample_size)
+            # Логируем факт чтения как бинарного (как просил пользователь)
+            if b'\x00' in sample:
+                return True
+            return False
+    except Exception:
+        return True  # При ошибке чтения считаем бинарным
+
+
+def normalize_encoding_name(enc):
+    """Нормализовать название кодировки для вывода: utf_8 → utf-8"""
+    if not enc:
+        return "unknown"
+    return enc.lower().replace('_', '-').replace('utf8', 'utf-8')
+
+
+def read_file_with_encoding(path, explicit_encoding=None):
+    """
+    Прочитать файл с обработкой кодировок.
+    
+    Возвращает кортеж:
+      (текст_utf8_или_None, исходная_кодировка, нужно_base64, является_бинарным, ошибка)
+    
+    Логика:
+      1. Сначала проверяем на бинарность по наличию \x00
+      2. Если текстовый — детектируем кодировку или используем явную
+      3. Декодируем в UTF-8 для основного блока
+      4. Определяем, нужен ли base64 (только если НЕ был в UTF-8 изначально)
+    """
+    # Шаг 1: проверка на бинарность
+    if is_binary_file(path):
+        return None, "binary", True, True, None
+    
+    # Шаг 2: читаем бинарные данные
+    try:
+        with open(path, "rb") as f:
+            raw_bytes = f.read()
+    except Exception as e:
+        return None, None, False, False, f"Ошибка чтения: {e}"
+    
+    # Шаг 3: определяем кодировку
+    encoding = explicit_encoding
+    if not encoding:
+        results = from_path(path).best()
+        if results:
+            encoding = results.encoding
+    
+    # Fallback на UTF-8 если детектирование не сработало
+    if not encoding:
+        encoding = "utf-8"
+    
+    # Шаг 4: пробуем декодировать
+    try:
+        text = raw_bytes.decode(encoding)
+        
+        # Проверяем, был ли файл уже в UTF-8 (включая UTF-8-BOM)
+        normalized_enc = normalize_encoding_name(encoding)
+        is_utf8_family = normalized_enc in ['utf-8', 'utf-8-sig', 'utf-8-bom', 'utf8', 'utf8-sig']
+        needs_base64 = not is_utf8_family
+        
+        return text, encoding, needs_base64, False, None
+    except (UnicodeDecodeError, LookupError) as e:
+        # Если декодирование не удалось — считаем бинарным
+        return None, encoding, True, True, f"Декодирование {encoding} не удалось: {e}"
 
 
 def collect_files(root, patterns, ignore_dirs):
+    """Собрать список файлов по шаблонам, исключая игнорируемые директории"""
     files = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirpath = Path(dirpath)
-        if should_ignore(dirpath, ignore_dirs):
+        # Пропускаем игнорируемые директории
+        if any(part in ignore_dirs for part in dirpath.relative_to(root).parts):
             continue
-
         for name in filenames:
-            p = dirpath / name
-            rel = p.relative_to(root)
-
+            rel = (dirpath / name).relative_to(root)
             if any(fnmatch.fnmatch(name, pat) for pat in patterns):
                 files.append(rel)
-
     return sorted(files)
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("root", nargs="?", default=".")
-    ap.add_argument("-o", "--output", default="bundle.md")
+    # Показать справку при запуске без аргументов
+    if len(sys.argv) == 1:
+        show_short_help()
+    
+    ap = argparse.ArgumentParser(
+        description="Сборщик исходного кода в единый Markdown-бандл с поддержкой разных кодировок",
+        epilog="Пример: python bundle.py . -o bundle.md -p \"*.cpp,*.h\" --ignore \".git,build\""
+    )
+    ap.add_argument("root", nargs="?", default=".", help="Корневая директория проекта")
+    ap.add_argument("-o", "--output", default="bundle.md", help="Имя выходного файла")
     ap.add_argument(
         "-p", "--patterns",
         default="*.cpp,*.h,*.hpp,*.c,*.py,*.md",
-        help="Comma-separated glob patterns"
+        help="Шаблоны файлов через запятую (glob-синтаксис)"
     )
     ap.add_argument(
         "--ignore",
         default=".git,node_modules,build,dist,__pycache__",
-        help="Comma-separated dir names to ignore"
+        help="Имена директорий для игнорирования через запятую"
     )
-
+    ap.add_argument(
+        "--encoding",
+        default=None,
+        help="Кодировка по умолчанию или маппинг: '*.txt:cp866,*.log:windows-1251'"
+    )
     args = ap.parse_args()
-
+    
     root = Path(args.root).resolve()
+    if not root.exists():
+        print(f"❌ Ошибка: путь не существует: {root}")
+        return 1
+    
     patterns = [p.strip() for p in args.patterns.split(",")]
     ignore_dirs = set(x.strip() for x in args.ignore.split(","))
-
+    
+    # Парсим маппинг кодировок
+    encoding_map = {}
+    default_encoding = None
+    if args.encoding:
+        parts = [p.strip() for p in args.encoding.split(",")]
+        for part in parts:
+            if ":" in part:
+                pat, enc = part.split(":", 1)
+                encoding_map[pat.strip()] = enc.strip()
+            else:
+                default_encoding = part.strip()
+    
     files = collect_files(root, patterns, ignore_dirs)
-
+    
+    if not files:
+        print(f"⚠️  Не найдено файлов по шаблонам: {args.patterns}")
+        print(f"   Проверьте путь: {root}")
+        return 1
+    
+    # Счётчики
+    total_count = 0
+    utf8_count = 0
+    converted_count = 0
+    binary_count = 0
+    
     with open(args.output, "w", encoding="utf-8") as out:
         out.write(f"# Bundle from `{root}`\n\n")
-
+        
         for rel in files:
             path = root / rel
-            out.write("\n---\n\n")
-            out.write(f"## `{rel}`\n\n")
-            out.write("```")
-            out.write(rel.suffix[1:] if rel.suffix else "")
+            
+            # Определяем явную кодировку по маппингу
+            explicit_encoding = None
+            name = rel.name
+            for pat, enc in encoding_map.items():
+                if fnmatch.fnmatch(name, pat):
+                    explicit_encoding = enc
+                    break
+            if explicit_encoding is None:
+                explicit_encoding = default_encoding
+            
+            # Читаем файл
+            text, detected_enc, needs_base64, is_binary, error = read_file_with_encoding(
+                path, explicit_encoding
+            )
+            
+            out.write("---\n")
+            out.write(f"## `{rel}`\n")
+            
+            if error:
+                out.write(f"<!-- bundle:error={error} -->\n")
+                out.write("```text\n")
+                out.write(f"<<ОШИБКА: {error}>>\n")
+                out.write("```\n\n")
+                print(f"[ERR] {rel}: {error}")
+                total_count += 1
+                continue
+            
+            if is_binary:
+                binary_count += 1
+                total_count += 1
+                norm_enc = normalize_encoding_name(detected_enc)
+                out.write(f"<!-- bundle:binary=true encoding={norm_enc} -->\n")
+                out.write(f"## `{rel}` (binary)\n")
+                out.write("```base64\n")
+                with open(path, "rb") as f:
+                    out.write(base64.b64encode(f.read()).decode("ascii"))
+                out.write("\n```\n\n")
+                print(f"[BIN] {rel} ({norm_enc})")
+                continue
+            
+            # Текстовый файл — сохраняем в UTF-8
+            norm_enc = normalize_encoding_name(detected_enc)
+            out.write(f"<!-- bundle:encoding={norm_enc} -->\n")
+            lang = rel.suffix[1:] if rel.suffix else ""
+            out.write(f"```{lang}\n")
+            # Убеждаемся, что текст заканчивается переводом строки
+            if text and not text.endswith('\n'):
+                text += '\n'
+            out.write(text)
+            out.write("```\n")
+            
+            # Добавляем base64 только если файл НЕ был в UTF-8 изначально
+            if needs_base64:
+                converted_count += 1
+                total_count += 1
+                out.write(f"\n## `{rel}` (original bytes)\n")
+                out.write("```base64\n")
+                with open(path, "rb") as f:
+                    out.write(base64.b64encode(f.read()).decode("ascii"))
+                out.write("\n```\n\n")
+                print(f"[CONV] {rel} ({norm_enc} → UTF-8 + base64)")
+            else:
+                utf8_count += 1
+                total_count += 1
+                print(f"[UTF8] {rel} ({norm_enc})")
+            
             out.write("\n")
-
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    out.write(f.read())
-            except Exception as e:
-                out.write(f"<<ERROR: {e}>>")
-
-            out.write("\n```\n")
-
-    print(f"Written {args.output} with {len(files)} files")
+    
+    print(f"\n✅ Записано {args.output}")
+    print(f"   Всего файлов: {total_count}")
+    print(f"   • UTF-8 (без дублирования): {utf8_count}")
+    print(f"   • Конвертировано (с base64): {converted_count}")
+    print(f"   • Бинарные: {binary_count}")
+    print(f"\n💡 Совет: Для восстановления оригинала используйте base64-блоки")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

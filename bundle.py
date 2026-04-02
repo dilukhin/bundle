@@ -124,6 +124,9 @@ def match_pattern(path, pattern, is_dir):
     pattern: строка, возможно с завершающим '/'
     is_dir: является ли path директорией
     """
+    # Нормализуем путь к формату с '/' (кроссплатформенно)
+    path_str = str(path).replace('\\', '/')
+    
     if pattern.endswith('/'):
         # Шаблон для директорий
         if not is_dir:
@@ -137,9 +140,11 @@ def match_pattern(path, pattern, is_dir):
         # Шаблон для файлов
         if is_dir:
             return False
-        # Совпадение только по имени файла
+        # Если шаблон содержит '/' — это полный путь к файлу
+        if '/' in pattern:
+            return path_str == pattern
+        # Иначе — совпадение только по имени файла
         return fnmatch.fnmatch(path.name, pattern)
-
 
 def apply_patterns_to_set(current_set, root, patterns_str, action="include"):
     """
@@ -151,13 +156,14 @@ def apply_patterns_to_set(current_set, root, patterns_str, action="include"):
         return current_set
 
     patterns = [p.strip() for p in patterns_str.split(",") if p.strip()]
+    
     all_paths = None
     new_set = set()
 
     if action == "include":
         # Для включения — собираем все пути из root один раз
         all_paths = collect_all_paths(root)
-
+        
     for item in current_set if action == "exclude" else (all_paths or set()):
         rel_path = item if isinstance(item, Path) else Path(item)
         is_dir = (root / rel_path).is_dir()

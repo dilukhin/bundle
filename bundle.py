@@ -160,12 +160,16 @@ def match_pattern(path, pattern, is_dir):
     """
     # Нормализуем путь к формату с '/' (кроссплатформенно)
     path_str = str(path).replace('\\', '/')
-    
-    if pattern.endswith('/'):
+    # Нормализуем шаблон
+    norm_pat = pattern.replace('\\', '/')
+    if norm_pat.startswith('./'):
+        norm_pat = norm_pat[2:]
+
+    if norm_pat.endswith('/'):
         # Шаблон для директорий
         if not is_dir:
             return False
-        dir_pattern = pattern.rstrip('/')
+        dir_pattern = norm_pat.rstrip('/')
         if dir_pattern == "":
             return True  # шаблон "/" совпадает с корнем
         # Совпадение: путь == шаблон ИЛИ путь внутри шаблона
@@ -174,47 +178,11 @@ def match_pattern(path, pattern, is_dir):
         # Шаблон для файлов
         if is_dir:
             return False
-        # Если шаблон содержит '/' — это полный путь к файлу
-        if '/' in pattern:
-            return path_str == pattern
+        # Если исходный шаблон содержал '/' (но не в конце) — точный путь
+        if '/' in pattern or '\\' in pattern:
+            return path_str == norm_pat
         # Иначе — совпадение только по имени файла
-        return fnmatch.fnmatch(path.name, pattern)
-
-def apply_patterns_to_set(current_set, root, patterns_str, action="include"):
-    """
-    Применить список шаблонов к текущему набору путей.
-    patterns_str: строка вида "pattern1,pattern2"
-    action: "include" или "exclude"
-    """
-    if not patterns_str:
-        return current_set
-
-    patterns = [p.strip() for p in patterns_str.split(",") if p.strip()]
-    
-    all_paths = None
-    new_set = set()
-
-    if action == "include":
-        # Для включения — собираем все пути из root один раз
-        all_paths = collect_all_paths(root)
-        
-    for item in current_set if action == "exclude" else (all_paths or set()):
-        rel_path = item if isinstance(item, Path) else Path(item)
-        is_dir = (root / rel_path).is_dir()
-
-        matched = False
-        for pat in patterns:
-            if match_pattern(rel_path, pat, is_dir):
-                matched = True
-                break
-
-        if action == "include" and matched:
-            new_set.add(rel_path)
-        elif action == "exclude" and not matched:
-            new_set.add(rel_path)
-
-    return new_set if action == "exclude" else (current_set | new_set)
-
+        return fnmatch.fnmatch(path.name, norm_pat)
 
 def parse_key_value_option(opt_str):
     """Разобрать опцию вида 'pattern: value' или 'pattern' (для флагов)"""
@@ -283,10 +251,20 @@ def main():
         sub_patterns = [normalize_pattern(p.strip()) for p in pattern_str.split(",") if p.strip()]
         for pat in sub_patterns:
             matched = []
-            for p in all_paths:
-                is_dir = (root / p).is_dir()
-                if match_pattern(p, pat, is_dir):
-                    matched.append(p)
+            # Классификация ДО нормализации для сохранения семантики
+            is_exact = ('/' in pat or '\\' in pat) and not pat.endswith('/')
+            if is_exact:
+                # Точный путь: резолвим относительно root
+                resolved = (root / pat).resolve()
+                if resolved.exists() and resolved.is_file():
+                    rel = Path(os.path.relpath(resolved, root))
+                    matched.append(rel)
+            else:
+                # Глоб-маска или директория: ищем в собранном дереве
+                for p in all_paths:
+                    is_dir = (root / p).is_dir()
+                    if match_pattern(p, pat, is_dir):
+                        matched.append(p)
 
             print(f"{pat} ({len(matched)})", file=sys.stderr)
             if not matched:

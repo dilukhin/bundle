@@ -42,7 +42,7 @@ jobs:
         run: python -m pip install "charset-normalizer>=3.3,<4"
 
       - name: Проверить синтаксис
-        run: python -m py_compile bundle.py tests/test_wildcard_paths.py
+        run: python -m py_compile bundle.py tests/test_wildcard_paths.py tests/test_exact_external_paths.py
 
       - name: Запустить тесты
         run: python -m unittest discover -s tests -v

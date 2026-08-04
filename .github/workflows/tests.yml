@@ -3,8 +3,7 @@ name: Автотесты
 on:
   pull_request:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -22,27 +21,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-        python-version:
-          - "3.9"
-          - "3.13"
-
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.9", "3.13"]
     steps:
-      - name: Получить исходный код
-        uses: actions/checkout@v5
-
-      - name: Установить Python
-        uses: actions/setup-python@v6
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-
-      - name: Установить зависимости
-        run: python -m pip install "charset-normalizer>=3.3,<4"
-
+      - run: python -m pip install "charset-normalizer>=3.3,<4"
       - name: Проверить синтаксис
-        run: python -m py_compile bundle.py tests/test_wildcard_paths.py tests/test_exact_external_paths.py
-
+        run: python -m compileall -q bundle.py bundle_model.py bundle_paths.py bundle_git.py bundle_select.py bundle_writer.py bundle_serialize.py bundle_output.py tests
       - name: Запустить тесты
         run: python -m unittest discover -s tests -v

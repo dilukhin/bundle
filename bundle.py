@@ -87,7 +87,8 @@ def is_binary_file(path, sample_size=4096):
         return True
 
 def normalize_pattern(pat):
-    """Нормализует шаблоны для интуитивного поведения (совместимость с Windows CMD)"""
+    """Нормализует разделители и маски для одинаковой обработки на разных ОС."""
+    pat = pat.replace('\\', '/')
     if pat.endswith('.*'):
         base = pat[:-2]
         # Если в базе уже есть *, fnmatch сам поймает расширения.
@@ -96,6 +97,46 @@ def normalize_pattern(pat):
     if pat == '*.*':
         return '*'
     return pat
+
+
+def has_wildcards(pattern):
+    """Проверить наличие glob-метасимволов в шаблоне."""
+    return any(char in pattern for char in '*?[')
+
+
+def match_path_glob(path_str, pattern):
+    """Сопоставить POSIX-путь с glob-шаблоном, где ** пересекает каталоги."""
+    path_parts = path_str.split('/') if path_str else []
+    pattern_parts = pattern.split('/') if pattern else []
+    memo = {}
+
+    def match_parts(pattern_index, path_index):
+        key = (pattern_index, path_index)
+        if key in memo:
+            return memo[key]
+
+        if pattern_index == len(pattern_parts):
+            result = path_index == len(path_parts)
+        elif pattern_parts[pattern_index] == '**':
+            result = (
+                match_parts(pattern_index + 1, path_index)
+                or (
+                    path_index < len(path_parts)
+                    and match_parts(pattern_index, path_index + 1)
+                )
+            )
+        elif path_index == len(path_parts):
+            result = False
+        else:
+            result = (
+                fnmatch.fnmatchcase(path_parts[path_index], pattern_parts[pattern_index])
+                and match_parts(pattern_index + 1, path_index + 1)
+            )
+
+        memo[key] = result
+        return result
+
+    return match_parts(0, 0)
 
 def normalize_encoding_name(enc):
     if not enc:
@@ -158,27 +199,37 @@ def match_pattern(path, pattern, is_dir):
     pattern: строка, возможно с завершающим '/'
     is_dir: является ли path директорией
     """
-    # Нормализуем путь к формату с '/' (кроссплатформенно)
     path_str = str(path).replace('\\', '/')
-    
+    pattern = normalize_pattern(pattern)
+
     if pattern.endswith('/'):
-        # Шаблон для директорий
+        # Шаблон для директорий. Сохраняем существующую семантику:
+        # выбираются сами каталоги, но не файлы внутри них.
         if not is_dir:
             return False
         dir_pattern = pattern.rstrip('/')
         if dir_pattern == "":
             return True  # шаблон "/" совпадает с корнем
+        if has_wildcards(dir_pattern):
+            parts = path_str.split('/')
+            return any(
+                match_path_glob('/'.join(parts[:index]), dir_pattern)
+                for index in range(1, len(parts) + 1)
+            )
         # Совпадение: путь == шаблон ИЛИ путь внутри шаблона
-        return str(path) == dir_pattern or str(path).startswith(dir_pattern + '/')
-    else:
-        # Шаблон для файлов
-        if is_dir:
-            return False
-        # Если шаблон содержит '/' — это полный путь к файлу
-        if '/' in pattern:
-            return path_str == pattern
-        # Иначе — совпадение только по имени файла
-        return fnmatch.fnmatch(path.name, pattern)
+        return path_str == dir_pattern or path_str.startswith(dir_pattern + '/')
+
+    # Шаблон для файлов
+    if is_dir:
+        return False
+    if '/' in pattern:
+        # Путь с glob-метасимволами раскрывается посегментно.
+        if has_wildcards(pattern):
+            return match_path_glob(path_str, pattern)
+        # Путь без glob-метасимволов остаётся точным путём.
+        return path_str == pattern
+    # Шаблон без разделителя ищет по имени файла во всём дереве.
+    return fnmatch.fnmatch(path.name, pattern)
 
 def apply_patterns_to_set(current_set, root, patterns_str, action="include"):
     """
@@ -189,7 +240,7 @@ def apply_patterns_to_set(current_set, root, patterns_str, action="include"):
     if not patterns_str:
         return current_set
 
-    patterns = [p.strip() for p in patterns_str.split(",") if p.strip()]
+    patterns = [normalize_pattern(p.strip()) for p in patterns_str.split(",") if p.strip()]
     
     all_paths = None
     new_set = set()
@@ -283,7 +334,7 @@ def main():
         sub_patterns = [normalize_pattern(p.strip()) for p in pattern_str.split(",") if p.strip()]
         for pat in sub_patterns:
             matched = []
-            for p in all_paths:
+            for p in sorted(all_paths, key=lambda item: item.as_posix()):
                 is_dir = (root / p).is_dir()
                 if match_pattern(p, pat, is_dir):
                     matched.append(p)
@@ -329,7 +380,7 @@ def main():
     # 2. Обработка исключений
     if args.ignore:
         for ign_str in args.ignore:
-            ign_pats = [p.strip() for p in ign_str.split(",") if p.strip()]
+            ign_pats = [normalize_pattern(p.strip()) for p in ign_str.split(",") if p.strip()]
             for p in list(current_set):
                 is_dir = (root / p).is_dir()
                 if any(match_pattern(p, ign, is_dir) for ign in ign_pats):

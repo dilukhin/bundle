@@ -2,10 +2,11 @@
 
 import fnmatch
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from urllib.parse import quote
 
 from bundle_model import BundleError
+
 
 def normalize_pattern(pattern):
     """Нормализовать разделители и маски для одинаковой обработки на разных ОС."""
@@ -17,8 +18,10 @@ def normalize_pattern(pattern):
         return "*"
     return pattern
 
+
 def has_wildcards(pattern):
     return any(char in pattern for char in "*?[")
+
 
 def is_exact_path_pattern(pattern):
     pattern = normalize_pattern(pattern)
@@ -30,6 +33,7 @@ def is_exact_path_pattern(pattern):
         or "/" in pattern
         or Path(pattern).is_absolute()
     )
+
 
 def match_path_glob(path_str, pattern):
     """Сопоставить POSIX-путь с glob-шаблоном, где ** пересекает каталоги."""
@@ -61,15 +65,13 @@ def match_path_glob(path_str, pattern):
 
     return match_parts(0, 0)
 
+
 def _absolute_without_symlink_resolution(path):
     """Получить абсолютный путь, не раскрывая символические ссылки."""
     absolute = Path(os.path.abspath(os.fspath(path)))
     if os.name != "nt":
         return absolute
 
-    # tempfile и Git могут вернуть один Windows-путь в короткой (8.3) и
-    # длинной форме. GetLongPathNameW выравнивает представление, не раскрывая
-    # reparse points, поэтому имя выбранной символической ссылки сохраняется.
     import ctypes
     buffer = ctypes.create_unicode_buffer(32768)
     length = ctypes.windll.kernel32.GetLongPathNameW(
@@ -79,6 +81,7 @@ def _absolute_without_symlink_resolution(path):
         return Path(buffer.value)
     return absolute
 
+
 def _normalized_commonpath(base, candidate):
     try:
         common = os.path.commonpath([os.fspath(base), os.fspath(candidate)])
@@ -86,16 +89,36 @@ def _normalized_commonpath(base, candidate):
         return None
     return os.path.normcase(common)
 
+
 def _is_within(base, candidate):
     common = _normalized_commonpath(base, candidate)
     return common is not None and common == os.path.normcase(os.fspath(base))
+
+
+def make_windows_external_archive_path(source_path):
+    """Построить переносимый путь внешней Windows-записи между дисками или UNC."""
+    source = PureWindowsPath(os.fspath(source_path))
+    drive = source.drive
+    if not drive:
+        raise BundleError(f"у внешнего Windows-пути отсутствует диск или UNC-ресурс: {source_path}")
+
+    if drive.startswith("\\\\"):
+        namespace = [part for part in drive.lstrip("\\").split("\\") if part]
+        prefix = ["@unc", *namespace]
+    else:
+        prefix = ["@drive", drive.rstrip(":").upper()]
+
+    tail = list(source.parts[1:]) if source.anchor else list(source.parts)
+    return Path(*prefix, *tail)
+
 
 def make_archive_path(root, source_path):
     """
     Получить переносимый путь записи относительно корня bundle.
 
-    Внутренние файлы получают обычный относительный путь. Внешние файлы сохраняют
-    относительный путь с ведущими ``..``. Абсолютный путь ОС в bundle не записывается.
+    Внутренние файлы получают обычный относительный путь. Внешние файлы на том
+    же диске сохраняют относительный путь с ведущими ``..``. Для другого диска
+    Windows или UNC используется пространство ``@drive``/``@unc``.
     """
     root_abs = _absolute_without_symlink_resolution(root)
     source_abs = _absolute_without_symlink_resolution(source_path)
@@ -103,9 +126,11 @@ def make_archive_path(root, source_path):
     try:
         relative = os.path.relpath(source_abs, root_abs)
     except ValueError as exc:
+        if os.name == "nt":
+            return make_windows_external_archive_path(source_abs)
         raise BundleError(
             "внешний файл нельзя представить относительным путём к корню bundle "
-            "(пути находятся на разных дисках или в разных пространствах имён)"
+            "(пути находятся в разных пространствах имён)"
         ) from exc
 
     relative_path = Path(relative)
@@ -113,14 +138,19 @@ def make_archive_path(root, source_path):
         raise BundleError(f"не удалось построить относительный путь: {source_path}")
     return relative_path
 
+
 def entry_kind_for_path(path):
-    return "external" if path.parts and path.parts[0] == ".." else "internal"
+    if not path.parts:
+        return "internal"
+    return "external" if path.parts[0] in {"..", "@drive", "@unc"} else "internal"
+
 
 def make_entry_key(kind, display_path):
     """Построить однозначный ASCII-ключ записи без магических имён каталогов."""
     prefix = "e" if kind == "external" else "i"
-    encoded = quote(display_path.as_posix(), safe="/._~-")
+    encoded = quote(display_path.as_posix(), safe="/._~@-")
     return f"{prefix}:{encoded}"
+
 
 def resolve_exact_file(root, pattern):
     """Разрешить точный путь в (отображаемый относительный путь, путь чтения, тип)."""
@@ -135,6 +165,7 @@ def resolve_exact_file(root, pattern):
     display_path = make_archive_path(root, source_path)
     return display_path, source_path, entry_kind_for_path(display_path)
 
+
 def collect_all_paths(root):
     paths = set()
     for dirpath, _dirnames, filenames in os.walk(root):
@@ -145,6 +176,7 @@ def collect_all_paths(root):
         for name in filenames:
             paths.add(rel_dir / name)
     return paths
+
 
 def match_pattern(path, pattern, is_dir):
     path_str = path.as_posix()
@@ -172,6 +204,7 @@ def match_pattern(path, pattern, is_dir):
         return path_str == pattern
     return fnmatch.fnmatch(path.name, pattern)
 
+
 def match_entry_pattern(root, display_path, source_path, pattern, is_dir):
     pattern = normalize_pattern(pattern)
     if is_exact_path_pattern(pattern):
@@ -183,6 +216,7 @@ def match_entry_pattern(root, display_path, source_path, pattern, is_dir):
             == _absolute_without_symlink_resolution(source_path)
         )
     return match_pattern(display_path, pattern, is_dir)
+
 
 def parse_key_value_option(option, requires_value=False):
     if not option:
@@ -201,4 +235,3 @@ def parse_key_value_option(option, requires_value=False):
         else:
             items.append((normalize_pattern(part), True))
     return items
-

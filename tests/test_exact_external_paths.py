@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from support import BundleCase
 
+
 class ExactExternalPathTests(BundleCase):
     def setUp(self):
         super().setUp()
@@ -86,8 +87,30 @@ class ExactExternalPathTests(BundleCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.entries(output), ["linked.txt"])
 
+    def test_cross_drive_and_unc_keys_are_preserved(self):
+        from bundle_paths import (
+            entry_kind_for_path,
+            make_entry_key,
+            make_windows_external_archive_path,
+        )
+
+        drive_path = make_windows_external_archive_path(r"C:\temp\file.txt")
+        self.assertEqual(drive_path.as_posix(), "@drive/C/temp/file.txt")
+        self.assertEqual(entry_kind_for_path(drive_path), "external")
+        self.assertEqual(make_entry_key("external", drive_path), "e:@drive/C/temp/file.txt")
+
+        unc_path = make_windows_external_archive_path(r"\\server\share\dir\file.txt")
+        self.assertEqual(unc_path.as_posix(), "@unc/server/share/dir/file.txt")
+        self.assertEqual(entry_kind_for_path(unc_path), "external")
+        self.assertEqual(
+            make_entry_key("external", unc_path),
+            "e:@unc/server/share/dir/file.txt",
+        )
+
     @unittest.skipUnless(os.name == "nt", "Windows only")
-    def test_cross_drive_is_rejected(self):
-        with self.assertRaises(Exception):
-            import bundle_paths
-            bundle_paths.make_archive_path(Path("D:/project"), Path("C:/temp/file.txt"))
+    def test_cross_drive_make_archive_path_is_supported(self):
+        import bundle_paths
+        archive_path = bundle_paths.make_archive_path(
+            Path("D:/project"), Path("C:/temp/file.txt")
+        )
+        self.assertEqual(archive_path.as_posix(), "@drive/C/temp/file.txt")

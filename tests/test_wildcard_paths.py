@@ -52,7 +52,7 @@ class WildcardPathTests(unittest.TestCase):
         for line in output_path.read_text(encoding="utf-8").splitlines():
             if not line.startswith("## `"):
                 continue
-            entry = line[4:].split("`", 1)[0]
+            entry = line[4:].split("`", 1)[0].replace("\\", "/")
             if entry not in entries:
                 entries.append(entry)
         return entries

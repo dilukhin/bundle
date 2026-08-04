@@ -38,3 +38,5 @@ var/
 *.log
 *.tmp
 stash/
+# ИИ агент
+.agent-safety/

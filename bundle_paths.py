@@ -63,7 +63,21 @@ def match_path_glob(path_str, pattern):
 
 def _absolute_without_symlink_resolution(path):
     """Получить абсолютный путь, не раскрывая символические ссылки."""
-    return Path(os.path.abspath(os.fspath(path)))
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    if os.name != "nt":
+        return absolute
+
+    # tempfile и Git могут вернуть один Windows-путь в короткой (8.3) и
+    # длинной форме. GetLongPathNameW выравнивает представление, не раскрывая
+    # reparse points, поэтому имя выбранной символической ссылки сохраняется.
+    import ctypes
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetLongPathNameW(
+        os.fspath(absolute), buffer, len(buffer)
+    )
+    if 0 < length < len(buffer):
+        return Path(buffer.value)
+    return absolute
 
 def _normalized_commonpath(base, candidate):
     try:

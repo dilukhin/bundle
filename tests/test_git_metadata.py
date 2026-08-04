@@ -1,6 +1,7 @@
 import shutil
 import subprocess
 import unittest
+from pathlib import Path
 from support import BundleCase
 
 @unittest.skipUnless(shutil.which("git"), "git unavailable")
@@ -16,7 +17,9 @@ class GitMetadataTests(BundleCase):
         result = self.cli(self.root, "-p", "one.txt", "--encoding", "*:utf-8", "-o", output)
         self.assertEqual(result.returncode, 0, result.stderr)
         text = self.text(output)
-        self.assertIn(f"Repository: {self.root.as_posix()}", text)
+        repository = [line.split(": ", 1)[1] for line in text.splitlines()
+                      if line.startswith("Repository: ")][0]
+        self.assertTrue(Path(repository).samefile(self.root))
         self.assertIn("Git status: not-a-git-repository", text)
 
     def test_clean_dirty_and_full_commit(self):

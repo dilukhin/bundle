@@ -8,8 +8,10 @@ from urllib.parse import quote
 __version__ = "0.2.0"
 BUNDLE_FORMAT_VERSION = "2"
 
+
 class BundleError(Exception):
     """Понятная пользователю ошибка формирования bundle."""
+
 
 @dataclass(frozen=True)
 class RepositoryMetadata:
@@ -34,8 +36,9 @@ class RepositoryMetadata:
 
 def make_entry_key(kind, display_path):
     prefix = "e" if kind == "external" else "i"
-    encoded = quote(display_path.as_posix(), safe="/.~_-")
+    encoded = quote(display_path.as_posix(), safe="/.~_@-")
     return f"{prefix}:{encoded}"
+
 
 @dataclass(frozen=True)
 class SelectedEntry:
@@ -52,6 +55,7 @@ class SelectedEntry:
     def key(self):
         return make_entry_key(self.kind, self.display_path)
 
+
 @dataclass(frozen=True)
 class FileSnapshot:
     raw_bytes: bytes
@@ -60,9 +64,18 @@ class FileSnapshot:
     encoding: str
     text: Optional[str]
     needs_base64: bool
+    text_is_exact: bool
+
+
+def serialized_text_payload(text):
+    """Вернуть текстовые байты, фактически представленные в fenced-блоке."""
+    payload = text or ""
+    if payload and not payload.endswith("\n"):
+        payload += "\n"
+    return payload
+
 
 def normalize_encoding_name(encoding):
     if not encoding:
         return "unknown"
     return encoding.lower().replace("_", "-").replace("utf8", "utf-8")
-

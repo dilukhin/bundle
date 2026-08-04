@@ -1,6 +1,7 @@
 import hashlib
 from support import BundleCase
 
+
 class FormatManifestTests(BundleCase):
     def test_empty_bundle_and_required_markers(self):
         output = self.work / "empty.md"
@@ -68,3 +69,71 @@ class FormatManifestTests(BundleCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("<!-- bundle:fragment:start -->", result.stdout)
         self.assertIn("i:one.txt", result.stdout)
+
+    def test_restoration_marks_exact_and_lossy_text(self):
+        samples = {
+            "bom.txt": b"\xef\xbb\xbftext\n",
+            "cp1251.txt": "текст\n".encode("cp1251"),
+            "crlf.txt": b"text\r\n",
+            "exact.txt": b"text\n",
+            "no-newline.txt": b"text",
+        }
+        for name, raw in samples.items():
+            (self.root / name).write_bytes(raw)
+
+        output = self.work / "restoration.md"
+        result = self.cli(
+            self.root,
+            "-p", ",".join(samples),
+            "--encoding", "bom.txt:utf-8-sig",
+            "--encoding", "cp1251.txt:cp1251",
+            "--encoding", "crlf.txt:utf-8",
+            "--encoding", "exact.txt:utf-8",
+            "--encoding", "no-newline.txt:utf-8",
+            "-o", output,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.fields(output, "Restoration"), [
+            "lossy", "exact", "lossy", "exact", "lossy"
+        ])
+        self.assertEqual(len(self.manifest(output)), 5)
+
+        without_backup = self.work / "without-backup.md"
+        result = self.cli(
+            self.root, "-p", "cp1251.txt", "--encoding", "cp1251.txt:cp1251",
+            "--no-binary-backup", "cp1251.txt", "-o", without_backup,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = self.text(without_backup)
+        self.assertEqual(self.fields(without_backup, "Restoration"), ["lossy"])
+        self.assertNotIn("### Original bytes", text)
+
+    def test_markdown_content_uses_longer_fence(self):
+        content = "# Nested\n\n```python\nprint('x')\n```\n\n````\nexample\n````\n"
+        self.file("nested.md", content)
+        output = self.work / "nested-bundle.md"
+        result = self.cli(
+            self.root, "-p", "nested.md", "--encoding", "nested.md:utf-8", "-o", output
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = self.text(output)
+        self.assertIn("`````md\n" + content + "`````\n", text)
+        self.assertEqual(self.fields(output, "Restoration"), ["exact"])
+
+    def test_paths_with_spaces_and_unicode_are_stable(self):
+        raw = "данные\n".encode("utf-8")
+        path = self.root / "каталог" / "file name.txt"
+        path.parent.mkdir()
+        path.write_bytes(raw)
+        output = self.work / "unicode.md"
+        result = self.cli(
+            self.root, "-p", "каталог/file name.txt",
+            "--encoding", "каталог/file name.txt:utf-8", "-o", output,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = self.text(output)
+        self.assertIn('Path: "каталог/file name.txt"', text)
+        self.assertIn("i:%D0%BA%D0%B0%D1%82%D0%B0%D0%BB%D0%BE%D0%B3/file%20name.txt", text)
+        self.assertEqual(self.manifest(output), [
+            f"{hashlib.sha256(raw).hexdigest()}  i:%D0%BA%D0%B0%D1%82%D0%B0%D0%BB%D0%BE%D0%B3/file%20name.txt"
+        ])

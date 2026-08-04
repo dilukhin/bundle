@@ -8,8 +8,15 @@ from pathlib import Path
 
 from charset_normalizer import from_bytes
 
-from bundle_model import BundleError, FileSnapshot, RepositoryMetadata, normalize_encoding_name
+from bundle_model import (
+    BundleError,
+    FileSnapshot,
+    RepositoryMetadata,
+    normalize_encoding_name,
+    serialized_text_payload,
+)
 from bundle_paths import _absolute_without_symlink_resolution, _is_within
+
 
 def _run_git(root, arguments, binary=False):
     try:
@@ -24,6 +31,7 @@ def _run_git(root, arguments, binary=False):
         )
     except FileNotFoundError:
         return None
+
 
 def _parse_git_status(raw_status):
     if not raw_status:
@@ -45,6 +53,7 @@ def _parse_git_status(raw_status):
         else:
             items.append(f"{status} {path}")
     return tuple(sorted(items))
+
 
 def collect_repository_metadata(root, generated_at=None):
     root_abs = _absolute_without_symlink_resolution(root)
@@ -99,6 +108,7 @@ def collect_repository_metadata(root, generated_at=None):
         git_repository_root=repository_root,
     )
 
+
 def repository_relative_path(repository_root, source_path):
     if repository_root is None:
         return None
@@ -107,6 +117,7 @@ def repository_relative_path(repository_root, source_path):
         return None
     return Path(os.path.relpath(source_abs, repository_root)).as_posix()
 
+
 def _stat_signature(stat_result):
     return (
         getattr(stat_result, "st_dev", None),
@@ -114,6 +125,7 @@ def _stat_signature(stat_result):
         stat_result.st_size,
         getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000)),
     )
+
 
 def read_stable_bytes(path):
     try:
@@ -138,12 +150,13 @@ def read_stable_bytes(path):
         raise BundleError(f"файл изменился во время формирования bundle: {path}")
     return raw_bytes
 
+
 def create_file_snapshot(path, explicit_encoding=None, need_sha256=True):
     raw_bytes = read_stable_bytes(path)
     digest = hashlib.sha256(raw_bytes).hexdigest() if need_sha256 else ""
 
     if b"\x00" in raw_bytes[:4096]:
-        return FileSnapshot(raw_bytes, digest, "binary", "binary", None, True)
+        return FileSnapshot(raw_bytes, digest, "binary", "binary", None, True, True)
 
     encoding = explicit_encoding
     if not encoding:
@@ -161,6 +174,7 @@ def create_file_snapshot(path, explicit_encoding=None, need_sha256=True):
     text = decoded.replace("\r\n", "\n").replace("\r", "\n")
     normalized = normalize_encoding_name(encoding)
     utf8_family = normalized in {"utf-8", "utf-8-sig", "utf-8-bom"}
+    rendered_bytes = serialized_text_payload(text).encode("utf-8")
     return FileSnapshot(
         raw_bytes=raw_bytes,
         sha256=digest,
@@ -168,5 +182,5 @@ def create_file_snapshot(path, explicit_encoding=None, need_sha256=True):
         encoding=encoding,
         text=text,
         needs_base64=not utf8_family,
+        text_is_exact=rendered_bytes == raw_bytes,
     )
-
